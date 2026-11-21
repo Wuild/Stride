@@ -8,7 +8,7 @@ Download the RPM for your distribution version and architecture from the
 [Stride releases](https://github.com/Wuild/Stride/releases). From the download directory:
 
 ```sh
-sudo dnf install ./stride-0.1.0-1.fc44.x86_64.rpm
+sudo dnf install ./stride-0.1.1-1.fc44.x86_64.rpm
 ```
 
 To update, download the newer RPM and run `sudo dnf upgrade ./<new-rpm-filename>`

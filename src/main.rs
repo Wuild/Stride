@@ -731,6 +731,14 @@ fn breadcrumb_target(directory: &str, count: usize, index: usize) -> Option<&Pat
             || path.ancestors().count(),
             |relative| 1 + relative.components().count(),
         );
+    if count == 3 && expected > count {
+        return match index {
+            0 => path.ancestors().nth(expected - 1),
+            // The ellipsis opens the same parent menu as the current folder.
+            1 | 2 => Some(path),
+            _ => None,
+        };
+    }
     if count != expected {
         return None;
     }
@@ -4158,5 +4166,24 @@ mod tests {
         wait(&mut state, |s| {
             s.prompt() && s.session.as_ref().unwrap().running_programs().is_empty()
         });
+
+        let deep = "Git/fishmaster/hidden-a/hidden-b/a-very-long-folder-name-for-stride";
+        let path = home.join(deep);
+        state.edit(format!("cd; mkdir -p {deep}; cd {deep}\r"), false);
+        wait(&mut state, |s| {
+            s.prompt() && s.terminal.directory.as_deref() == path.to_str()
+        });
+        let (row, _) = state.terminal.cursor();
+        let prompt = state
+            .terminal
+            .text((row, 0), (row, state.terminal.cols - 1));
+        assert_eq!(
+            prompt.split_whitespace().collect::<Vec<_>>(),
+            [user, "…", "a-very-long-folder-na…"]
+        );
+        assert_eq!(state.terminal.folder_spans.len(), 3);
+        assert_eq!(state.folder_target(0), Some(home.as_path()));
+        assert_eq!(state.folder_target(1), Some(path.as_path()));
+        assert_eq!(state.folder_target(2), Some(path.as_path()));
     }
 }

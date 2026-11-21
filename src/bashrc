@@ -31,7 +31,7 @@ __stride_prompt() {
 }
 
 __stride_set_prompt() {
-    local directory=$1 home=${HOME%/} relative i color label show_home=0
+    local directory=$1 home=${HOME%/} relative i color label padding collapsed=0 show_home=0
     if [[ $PWD == "$HOME" || $PWD == "$home" ]]; then
         show_home=1
         __stride_parts=("")
@@ -48,16 +48,26 @@ __stride_set_prompt() {
         __stride_parts=(/ "${__stride_parts[@]}")
     fi
 
+    if (( ${#__stride_parts[@]} > 3 )); then
+        __stride_parts=("${__stride_parts[0]}" "…" "${__stride_parts[-1]}")
+        collapsed=1
+    fi
+
     PS1='\[\e]133;A\a\e]133;G\a\e[48;2;3;7;11m\]    \[\e[0m\]'
     for i in "${!__stride_parts[@]}"; do
         PS1+='\[\e[48;2;9;13;19m\] \[\e[0m\]'
         if (( i % 2 == 0 )); then color='5;9;13'; else color='7;11;17'; fi
+        padding='   '
         if (( i == 0 && show_home )); then
             label='\u'
         else
+            if (( collapsed && i == 1 )); then padding=' '; fi
+            if (( ${#__stride_parts[i]} > 22 )); then
+                __stride_parts[i]="${__stride_parts[i]:0:21}…"
+            fi
             label='${__stride_parts['"$i"']}'
         fi
-        PS1+='\[\e]133;X\a\e[48;2;'"$color"'m\]   '"$label"' \[\e[0m\e]133;Y\a\]'
+        PS1+='\[\e]133;X\a\e[48;2;'"$color"'m\]'"$padding$label"' \[\e[0m\e]133;Y\a\]'
     done
     PS1+='  \[\e]133;B\a\]'
 }
