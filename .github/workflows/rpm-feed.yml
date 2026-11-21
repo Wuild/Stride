@@ -1,0 +1,84 @@
+name: Publish DNF feed
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to sync
+        required: true
+        type: string
+
+concurrency:
+  group: stride-rpm-feed
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: rpm-feed
+          path: feed
+      - name: Download the release RPM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable release tag such as v0.1.1." >&2
+            exit 1
+          fi
+          if [[ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" != false ]]; then
+            echo "The release must be published and stable." >&2
+            exit 1
+          fi
+          version=${TAG#v}
+          mkdir release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern "stride-$version-1.fc44.x86_64.rpm"
+          echo "STRIDE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Sign and stage the RPM
+        env:
+          STRIDE_RPM_SIGNING_KEY: ${{ secrets.STRIDE_RPM_SIGNING_KEY }}
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e STRIDE_RPM_SIGNING_KEY -e STRIDE_VERSION fedora:44 bash -euc '
+              dnf -qy install createrepo_c rpm-sign gnupg2 diffutils
+              packaging/update-rpm-feed.sh feed \
+                "release/stride-$STRIDE_VERSION-1.fc44.x86_64.rpm" "$STRIDE_VERSION"
+            '
+      - name: Persist the feed branch and stage Pages files
+        run: |
+          git -C feed add -- fedora/44/x86_64
+          if ! git -C feed diff --cached --quiet; then
+            git -C feed -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "Add Stride $STRIDE_VERSION to the DNF feed"
+            git -C feed push origin HEAD:rpm-feed
+          fi
+          mkdir site
+          git -C feed archive HEAD | tar -x -C site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the signed feed
+        id: deployment
+        uses: actions/deploy-pages@v4
