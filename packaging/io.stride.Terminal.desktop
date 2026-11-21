@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Stride
+GenericName=Terminal Emulator
+Comment=Run shell commands in tabs and split panes
+Exec=stride
+TryExec=stride
+Icon=io.stride.Terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;command;prompt;console;
+X-TerminalArgExec=-e
+X-TerminalArgDir=--working-directory

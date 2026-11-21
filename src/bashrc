@@ -1,0 +1,402 @@
+# This file is sourced by the interactive Bash session before its first prompt.
+[[ -r ~/.bashrc ]] && source ~/.bashrc
+
+__stride_prompt() {
+    local status=$? label
+    local HISTTIMEFORMAT=
+    local entry_pattern='^[[:blank:]]*[0-9]+[ *][[:blank:]](.*)$'
+    label=$(history 1)
+    if [[ $label =~ $entry_pattern ]]; then label=${BASH_REMATCH[1]}; fi
+    label=${label//[[:cntrl:];]/ }
+    if [[ ${STRIDE_SYNC_HISTORY:-1} == 1 && -o history && -n ${HISTFILE-} ]]; then
+        history -a 2>/dev/null || :
+    fi
+    mapfile -t __stride_history < <(history 300)
+    if [[ -z ${__stride_archive_sent-} ]]; then
+        local item
+        for item in "${__stride_history[@]}"; do
+            [[ $item =~ $entry_pattern ]] || continue
+            item=${BASH_REMATCH[1]}
+            item=${item//[[:cntrl:]]/ }
+            printf '\e]133;H;%s\a' "${item:0:720}"
+        done
+        __stride_archive_sent=1
+    fi
+    __stride_train
+    printf '\e]133;D;%d;%s\a' "$status" "${label:0:160}"
+    local directory=${PWD//[[:cntrl:]]/ }
+    if [[ ${STRIDE_COMPACT_PROMPT:-1} == 1 ]]; then __stride_set_prompt "$directory"; fi
+    printf '\e]133;W;%s\a' "$directory"
+    return "$status"
+}
+
+__stride_set_prompt() {
+    local directory=$1 home=${HOME%/} relative i color label show_home=0
+    if [[ $PWD == "$HOME" || $PWD == "$home" ]]; then
+        show_home=1
+        __stride_parts=("")
+    elif [[ $PWD == "$home/"* ]]; then
+        relative=${PWD#"$home/"}
+        relative=${relative//[[:cntrl:]]/ }
+        IFS=/ read -r -a __stride_parts <<< "$relative"
+        show_home=1
+        __stride_parts=("" "${__stride_parts[@]}")
+    elif [[ $directory == / ]]; then
+        __stride_parts=(/)
+    else
+        IFS=/ read -r -a __stride_parts <<< "${directory#/}"
+        __stride_parts=(/ "${__stride_parts[@]}")
+    fi
+
+    PS1='\[\e]133;A\a\e]133;G\a\e[48;2;3;7;11m\]    \[\e[0m\]'
+    for i in "${!__stride_parts[@]}"; do
+        PS1+='\[\e[48;2;9;13;19m\] \[\e[0m\]'
+        if (( i % 2 == 0 )); then color='5;9;13'; else color='7;11;17'; fi
+        if (( i == 0 && show_home )); then
+            label='\u'
+        else
+            label='${__stride_parts['"$i"']}'
+        fi
+        PS1+='\[\e]133;X\a\e[48;2;'"$color"'m\]   '"$label"' \[\e[0m\e]133;Y\a\]'
+    done
+    PS1+='  \[\e]133;B\a\]'
+}
+
+__stride_path_match() {
+    local token=$1 mode=$2 collect=${3-} word=$1 tilde= candidate escaped
+    if [[ $word == '~/'* ]]; then
+        word=$HOME/${word:2}
+        tilde=$HOME/
+    fi
+    while IFS= read -r candidate; do
+        [[ -e $candidate || -L $candidate ]] || continue
+        [[ $candidate != *[[:cntrl:]]* ]] || continue
+        if [[ -d $candidate && $candidate != */ ]]; then candidate+=/; fi
+        if [[ -n $tilde && $candidate == "$tilde"* ]]; then
+            printf -v escaped '%q' "${candidate#"$tilde"}"
+            escaped='~/'$escaped
+        else
+            printf -v escaped '%q' "$candidate"
+        fi
+        if [[ $escaped == "$token"* && $escaped != "$token" ]]; then
+            if [[ $collect ]]; then
+                __stride_add_choice "${escaped#"$token"}" && return 0
+            else
+                __stride_suffix=${escaped#"$token"}
+                return 0
+            fi
+        fi
+    done < <(compgen "$mode" -- "$word")
+    return 1
+}
+
+__stride_completion_candidates() (
+    local -a COMP_WORDS=("$@") COMPREPLY=()
+    local COMP_CWORD=$(($# - 1)) COMP_TYPE=9 COMP_KEY=9
+    local COMP_LINE="$*"
+    local COMP_POINT=${#COMP_LINE}
+    local command=${COMP_WORDS[0]} spec function_name
+    [[ $command =~ ^[[:alnum:]_.+-]+$ ]] || return 1
+    # Package queries can block Readline while repo metadata is loaded.
+    # Bash's regular Tab completion still uses the installed package completer.
+    case $command in dnf|dnf4|dnf5|yum) return 1 ;; esac
+    if ! spec=$(complete -p -- "$command" 2>/dev/null); then
+        if declare -F _comp_load >/dev/null; then
+            _comp_load "$command" >/dev/null 2>&1 || :
+        elif declare -F _completion_loader >/dev/null; then
+            _completion_loader "$command" >/dev/null 2>&1 || :
+        fi
+        spec=$(complete -p -- "$command" 2>/dev/null) || return 1
+    fi
+    local function_spec='[[:blank:]]-F[[:blank:]]+([[:alnum:]_:+.-]+)([[:blank:]]|$)'
+    [[ $spec =~ $function_spec ]] || return 1
+    function_name=${BASH_REMATCH[1]}
+    declare -F -- "$function_name" >/dev/null || return 1
+    "$function_name" "$command" "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}" >/dev/null 2>&1 || :
+    (("${#COMPREPLY[@]}")) && printf '%s\n' "${COMPREPLY[@]}"
+)
+
+# The caller owns "words" and "i"; Bash gives helpers access to those local variables.
+__stride_unwrap_sudo() {
+    local end=$1
+    i=0
+    if [[ ${words[0]} != sudo ]]; then return 0; fi
+    i=1
+    while ((i < end)); do
+        case ${words[i]} in
+            --) ((++i)); break ;;
+            -e|--edit|-l|--list|-v|--validate|-k|--reset-timestamp|-K|--remove-timestamp)
+                return 1 ;;
+            -[uUgphCRT]|--user|--other-user|--group|--prompt|--host|--close-from|--chdir|--command-timeout)
+                ((i += 2)) ;;
+            -*|[[:alnum:]_]*=*) ((++i)) ;;
+            *) break ;;
+        esac
+    done
+}
+
+declare -A __stride_learned_words=() __stride_learned_votes=()
+
+__stride_train() {
+    local line candidate context key n i
+    local -a words
+    local entry='^[[:blank:]]*[0-9]+[ *][[:blank:]](.*)$'
+    local simple='^[[:blank:][:alnum:]_./@%+,=:~-]+$'
+    __stride_learned_words=()
+    __stride_learned_votes=()
+    for ((n=${#__stride_history[@]}-1; n>=0; n--)); do
+        line=${__stride_history[n]}
+        [[ $line =~ $entry ]] || continue
+        line=${BASH_REMATCH[1]}
+        [[ $line =~ $simple ]] || continue
+        read -r -a words <<< "$line"
+        (("${#words[@]}")) || continue
+        __stride_unwrap_sudo "${#words[@]}" || continue
+        context='>'
+        for ((; i<${#words[@]}; i++)); do
+            candidate=${words[i]}
+            key="$context $candidate"
+            if [[ ! -v __stride_learned_votes[$key] ]]; then
+                __stride_learned_words[$context]+=" $candidate"
+            fi
+            __stride_learned_votes[$key]=$((${__stride_learned_votes[$key]:-0} + 1))
+            context=$key
+        done
+    done
+}
+
+__stride_learned_match() {
+    local context=$1 token=$2 candidate score best=0 match=
+    local -a candidates
+    read -r -a candidates <<< "${__stride_learned_words[$context]-}"
+    for candidate in "${candidates[@]}"; do
+        [[ $candidate == "$token"* && $candidate != "$token" ]] || continue
+        score=${__stride_learned_votes["$context $candidate"]:-0}
+        if ((score > best)); then best=$score; match=$candidate; fi
+    done
+    if [[ -n $match ]]; then
+        __stride_suffix=${match#"$token"}
+        return 0
+    fi
+    return 1
+}
+
+__stride_complete_word() {
+    local prefix=$1 candidate token head context match= i=0 last j
+    local -a words
+    local simple='^[[:blank:][:alnum:]_./@%+,=:~-]+$'
+    [[ $prefix =~ $simple ]] || return 1
+    read -r -a words <<< "$prefix"
+    if [[ $prefix == *[[:blank:]] ]]; then words+=(""); fi
+    last=$(("${#words[@]}" - 1))
+    ((last >= 0)) || return 1
+    token=${words[last]}
+    __stride_unwrap_sudo "$last" || return 1
+    if [[ ${words[0]} == sudo && $i == "$last" && $token == -* ]]; then i=0; fi
+    ((i <= last)) || return 1
+    head=${words[i]}
+    if ((i == last)); then
+        [[ -n $token && $token != */* && $token != -* ]] || return 1
+        type -t -- "$token" >/dev/null 2>&1 && return 1
+        if __stride_learned_match '>' "$token"; then return 0; fi
+        while IFS= read -r candidate; do
+            if [[ $candidate =~ ^[[:alnum:]_.+-]+$ && $candidate == "$token"* && $candidate != "$token" ]]; then
+                if [[ $candidate == systemctl && $token == syst* ]]; then
+                    match=$candidate
+                    break
+                fi
+                if [[ -z $match || ${#candidate} -lt ${#match} ]]; then match=$candidate; fi
+            fi
+        done < <(compgen -c -- "$token")
+    else
+        context='>'
+        for ((j=i; j<last; j++)); do context+=" ${words[j]}"; done
+        if __stride_learned_match "$context" "$token"; then return 0; fi
+        while IFS= read -r candidate; do
+            if [[ $candidate =~ ^[[:alnum:]_./@%+,=:~-]+$ && $candidate == "$token"* && $candidate != "$token" ]]; then
+                if [[ -z $match ]]; then match=$candidate; fi
+                if [[ $head != systemctl || $token != dae* ]]; then break; fi
+                if [[ $candidate == daemon-reload ]]; then match=$candidate; break; fi
+            fi
+        done < <(__stride_completion_candidates "${words[@]:i}")
+    fi
+    if [[ -n $match ]]; then
+        __stride_suffix=${match#"$token"}
+        return 0
+    fi
+    return 1
+}
+
+__stride_match() {
+    local prefix=$READLINE_LINE candidate i head token mode
+    local original_locale=${LC_ALL-} LC_ALL=C
+    local entry_pattern='^[[:blank:]]*[0-9]+[ *][[:blank:]](.*)$'
+    __stride_suffix=
+    [[ -n $prefix && $prefix != *[[:cntrl:]]* &&
+        $READLINE_POINT -eq ${#prefix} ]] || return 0
+    head=${prefix%%[[:blank:]]*}
+    token=${prefix##*[[:blank:]]}
+    # Complete simple shell words. History still covers quoted and complex commands.
+    local path_token='^(~/)?[[:alnum:]_./@%+,=-]+$'
+    if [[ $token =~ $path_token ]]; then
+        if [[ $head == cd || $head == pushd ]]; then mode=-d; else mode=-f; fi
+        if [[ $token == */* || $mode == -d ]] &&
+            LC_ALL=$original_locale __stride_path_match "$token" "$mode"; then
+            return 0
+        fi
+    fi
+    for ((i=${#__stride_history[@]}-1; i>=0; i--)); do
+        [[ ${__stride_history[i]} =~ $entry_pattern ]] || continue
+        candidate=${BASH_REMATCH[1]}
+        if [[ $candidate == "$prefix"* && $candidate != "$prefix" && $candidate != *[[:cntrl:]]* ]]; then
+            __stride_suffix=${candidate#"$prefix"}
+            return 0
+        fi
+    done
+    if __stride_complete_word "$prefix"; then return 0; fi
+    if [[ $token =~ $path_token && $prefix != "$token" && $mode == -f
+        && $token != */* && $token != -* ]]; then
+        LC_ALL=$original_locale __stride_path_match "$token" -f || :
+    fi
+
+}
+
+__stride_add_choice() {
+    local suffix=$1 item
+    [[ -n $suffix && $suffix != *[[:cntrl:]]* ]] || return 1
+    for item in "${__stride_choices[@]}"; do
+        [[ $item == "$suffix" ]] && return 1
+    done
+    __stride_choices+=("$suffix")
+    (("${#__stride_choices[@]}" >= 8))
+}
+
+__stride_collect_choices() {
+    local line=$1 token candidate context mode i j last
+    local -a words learned
+    local entry='^[[:blank:]]*[0-9]+[ *][[:blank:]](.*)$'
+    local simple='^[[:blank:][:alnum:]_./@%+,=:~-]+$'
+    [[ -n $__stride_suffix ]] || return 0
+    __stride_add_choice "$__stride_suffix"
+    for ((i=${#__stride_history[@]}-1; i>=0; i--)); do
+        [[ ${__stride_history[i]} =~ $entry ]] || continue
+        candidate=${BASH_REMATCH[1]}
+        [[ $candidate == "$line"* && $candidate != "$line" ]] || continue
+        __stride_add_choice "${candidate#"$line"}" && return 0
+    done
+    [[ $line =~ $simple ]] || return 0
+    read -r -a words <<< "$line"
+    if [[ $line == *[[:blank:]] ]]; then words+=(""); fi
+    last=$(("${#words[@]}" - 1))
+    ((last >= 0)) || return 0
+    token=${words[last]}
+    __stride_unwrap_sudo "$last" || return 0
+    ((i <= last)) || return 0
+    if [[ ${words[0]} == sudo && $i == "$last" && $token == -* ]]; then i=0; fi
+    context='>'
+    for ((j=i; j<last; j++)); do context+=" ${words[j]}"; done
+    read -r -a learned <<< "${__stride_learned_words[$context]-}"
+    for candidate in "${learned[@]}"; do
+        [[ $candidate == "$token"* ]] || continue
+        __stride_add_choice "${candidate#"$token"}" && return 0
+    done
+    if [[ $token == */* || ${words[i]} == cd || ${words[i]} == pushd ]]; then
+        mode=-f
+        if [[ ${words[i]} == cd || ${words[i]} == pushd ]]; then mode=-d; fi
+        __stride_path_match "$token" "$mode" all || :
+    elif ((i == last)) && [[ -n $token && $token != -* ]]; then
+        while IFS= read -r candidate; do
+            [[ $candidate =~ ^[[:alnum:]_.+-]+$ && $candidate == "$token"* ]] || continue
+            __stride_add_choice "${candidate#"$token"}" && return 0
+        done < <(compgen -c -- "$token")
+    else
+        while IFS= read -r candidate; do
+            [[ $candidate =~ ^[[:alnum:]_./@%+,=:~-]+$ && $candidate == "$token"* ]] || continue
+            __stride_add_choice "${candidate#"$token"}" && return 0
+        done < <(__stride_completion_candidates "${words[@]:i}")
+        if [[ -n $token && $token != -* ]]; then
+            __stride_path_match "$token" -f all || :
+        fi
+    fi
+}
+
+__stride_preview() {
+    __stride_match
+    local display=${READLINE_LINE//[[:cntrl:]]/ } suffix
+    local -a __stride_choices=()
+    __stride_collect_choices "$READLINE_LINE"
+    printf '\e]133;I;%s\a\e]133;P;%s\a' "$display" "$__stride_suffix"
+    for suffix in "${__stride_choices[@]}"; do
+        printf '\e]133;S;%s\a' "$suffix"
+    done
+}
+
+__stride_right() {
+    local LC_ALL=C next
+    __stride_match
+    if [[ -n $__stride_suffix ]]; then
+        READLINE_LINE+=$__stride_suffix
+        READLINE_POINT=${#READLINE_LINE}
+        __stride_preview
+    elif (( READLINE_POINT < ${#READLINE_LINE} )); then
+        next=$((READLINE_POINT + 1))
+        while [[ ${READLINE_LINE:next:1} == [$'\x80'-$'\xbf'] ]]; do ((++next)); done
+        READLINE_POINT=$next
+        __stride_preview
+    fi
+}
+
+__stride_prepare_elevated() {
+    local command line=$READLINE_LINE LC_ALL=C
+    local simple='^[[:alnum:]_./+-]+([[:blank:]]+[[:alnum:]_./@%+,=:~-]+)*[[:blank:]]*$'
+    if [[ $line =~ $simple ]]; then
+        command=${line%%[[:blank:]]*}
+        if [[ $command != sudo ]] && type -P -- "$command" >/dev/null 2>&1; then
+            READLINE_LINE="sudo -- $line"
+            READLINE_POINT=${#READLINE_LINE}
+            __stride_preview
+            printf '\e]133;U;1\a'
+            return
+        fi
+    fi
+    printf '\e]133;U;0\a'
+}
+
+__stride_can_navigate() {
+    if [[ -z $READLINE_LINE ]]; then
+        printf '\e]133;N;1\a'
+    else
+        printf '\e]133;N;0\a'
+    fi
+}
+
+# Reuse the same command definitions that ordinary Bash Tab completion uses.
+if ! declare -F _comp_load >/dev/null && ! declare -F _completion_loader >/dev/null &&
+    [[ -r /usr/share/bash-completion/bash_completion ]]; then
+    source /usr/share/bash-completion/bash_completion
+fi
+
+if [[ ${STRIDE_SYNC_HISTORY:-1} == 1 ]]; then
+    shopt -s histappend
+fi
+PROMPT_COMMAND=(__stride_prompt "${PROMPT_COMMAND[@]}")
+# Keep the configured prompt when the compact style is disabled.
+if [[ ${STRIDE_COMPACT_PROMPT:-1} != 1 ]]; then
+    PS1='\[\e]133;A\a\]'${PS1}'\[\e]133;B\a\]'
+fi
+PS2='\[\e]133;E\a\]'${PS2}
+PS0=$'\e]133;C\a'${PS0}
+for __stride_map in emacs-standard vi-insert; do
+    bind -m "$__stride_map" '"\e[27;5;40~": beginning-of-line'
+    bind -m "$__stride_map" '"\e[27;5;41~": forward-char'
+    bind -m "$__stride_map" '"\e[27;5;42~": delete-char'
+    bind -m "$__stride_map" '"\e[27;5;43~": kill-line'
+    bind -m "$__stride_map" -x '"\e[27;5;32~":__stride_preview'
+    bind -m "$__stride_map" -x '"\e[27;5;33~":__stride_right'
+    bind -m "$__stride_map" -x '"\e[27;5;34~":__stride_can_navigate'
+    bind -m "$__stride_map" -x '"\e[27;6;13~":__stride_prepare_elevated'
+done
+bind -m vi-command -x '"\e[27;5;32~":__stride_preview'
+bind -m vi-command -x '"\e[27;5;34~":__stride_can_navigate'
+bind -m vi-command -x '"\e[27;6;13~":__stride_prepare_elevated'
+unset __stride_map
