@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Stride
+Name=Stride Terminal
 GenericName=Terminal Emulator
 Comment=Run shell commands in tabs and split panes
 Exec=stride
