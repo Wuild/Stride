@@ -1,0 +1,8 @@
+[stride]
+name=Stride RPMs for Fedora $releasever ($basearch)
+baseurl=https://wuild.github.io/Stride/fedora/$releasever/$basearch/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://wuild.github.io/Stride/RPM-GPG-KEY-stride
+skip_if_unavailable=True
