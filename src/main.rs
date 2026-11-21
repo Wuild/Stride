@@ -169,6 +169,7 @@ struct State {
     parser: vte::Parser,
     session: Option<Session>,
     selection: Option<(Point, Point)>,
+    selection_drag: Option<(Point, (f64, f64))>,
     top: Option<usize>,
     font_size: f64,
     cell: (f64, f64),
@@ -199,6 +200,7 @@ impl State {
                 parser: vte::Parser::new(),
                 session,
                 selection: None,
+                selection_drag: None,
                 top: None,
                 font_size: 14.0,
                 cell: (9.0, 20.0),
@@ -648,6 +650,29 @@ impl State {
 
     fn scroll(&mut self, delta: isize) {
         self.jump(self.viewport().first.saturating_add_signed(delta));
+        if let Some((_, (x, y))) = self.selection_drag {
+            self.extend_selection_drag(x, y);
+        }
+    }
+
+    fn extend_selection_drag(&mut self, x: f64, y: f64) {
+        let Some((anchor, pointer)) = &mut self.selection_drag else {
+            return;
+        };
+        *pointer = (x, y);
+        let anchor = *anchor;
+        let mut target = self.point(x, y);
+        if let Some(edge) = self.viewport().selection_edge(anchor.0, target.0) {
+            target = (
+                edge,
+                if edge < target.0 {
+                    self.terminal.cols - 1
+                } else {
+                    0
+                },
+            );
+        }
+        self.selection = self.terminal.trim_selection(anchor, target);
     }
 
     fn point(&self, x: f64, y: f64) -> Point {
@@ -1845,9 +1870,15 @@ fn install_input(
         state,
         #[weak]
         area,
-        move |_, _, _| {
+        move |_, x, y| {
             area.grab_focus();
-            state.borrow_mut().selection = None;
+            let mut state = state.borrow_mut();
+            let on_suggestion = SuggestionMenu::for_prompt(&state, f64::from(area.width()))
+                .and_then(|menu| menu.hit(x, y))
+                .is_some();
+            state.selection = None;
+            state.selection_drag = (!on_suggestion && x < f64::from(area.width()) - 11.0)
+                .then(|| (state.point(x, y), (x, y)));
             area.queue_draw();
         }
     ));
@@ -1861,12 +1892,6 @@ fn install_input(
                 return;
             };
             let mut state = state.borrow_mut();
-            if SuggestionMenu::for_prompt(&state, f64::from(area.width()))
-                .and_then(|menu| menu.hit(x, y))
-                .is_some()
-            {
-                return;
-            }
             if x >= f64::from(area.width()) - 11.0 {
                 let oldest = state.terminal.oldest();
                 let latest = state.live_view_top();
@@ -1875,21 +1900,23 @@ fn install_input(
                 let row = oldest + (ratio * (latest - oldest) as f64).round() as usize;
                 state.top = (row < latest).then_some(row);
             } else {
-                let anchor = state.point(x, y);
-                let mut target = state.point(x + dx, y + dy);
-                if let Some(edge) = state.viewport().selection_edge(anchor.0, target.0) {
-                    target = (
-                        edge,
-                        if edge < target.0 {
-                            state.terminal.cols - 1
-                        } else {
-                            0
-                        },
-                    );
-                }
-                state.selection = state.terminal.trim_selection(anchor, target);
+                state.extend_selection_drag(x + dx, y + dy);
             }
             area.queue_draw();
+        }
+    ));
+    drag.connect_drag_end(glib::clone!(
+        #[weak]
+        state,
+        move |_, _, _| {
+            state.borrow_mut().selection_drag = None;
+        }
+    ));
+    drag.connect_cancel(glib::clone!(
+        #[weak]
+        state,
+        move |_, _| {
+            state.borrow_mut().selection_drag = None;
         }
     ));
     area.add_controller(drag);
@@ -3818,6 +3845,35 @@ mod tests {
             Some(gdk::SurfaceEdge::South)
         );
         assert_eq!(window_edge(900, 585, 888.0, 10.0), None);
+    }
+
+    #[test]
+    fn drag_selection_keeps_its_anchor_while_scrolling() {
+        let (mut state, _) = State::new(&LaunchOptions {
+            command: vec![std::ffi::OsString::new()],
+            ..LaunchOptions::default()
+        });
+        state.terminal = Terminal::new(40, 4);
+        state.parser.advance(
+            &mut state.terminal,
+            b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive",
+        );
+        let anchor = state.point(13.0, 71.0);
+        state.selection_drag = Some((anchor, (13.0, 11.0)));
+        state.extend_selection_drag(13.0, 11.0);
+        let original_start = state.selection.unwrap().0;
+        state.scroll(-2);
+        let (start, end) = state.selection.unwrap();
+        assert!(start < original_start);
+        assert_eq!(end, anchor);
+        assert_eq!(
+            state.terminal.text(start, end),
+            "zero\none\ntwo\nthree\nfour\nf"
+        );
+
+        state.selection_drag = None;
+        state.scroll(2);
+        assert_eq!(state.selection, Some((start, end)));
     }
 
     #[test]
