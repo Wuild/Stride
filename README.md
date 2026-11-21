@@ -45,6 +45,13 @@ sudo dnf install cargo rust gcc rpm-build desktop-file-utils gtk4-devel libadwai
 The binary RPM is written under `rpmbuild/RPMS/`. Build and test on the
 distribution release you intend to support.
 
+### Publish an RPM update
+
+Attach `stride-<version>-1.fc44.x86_64.rpm` to the GitHub release for
+`v<version>` before publishing it. The **Publish DNF feed** workflow signs the
+RPM, updates the repository metadata, and deploys to GitHub Pages. To retry a
+published release, use **Run workflow** on the Actions tab and enter its tag.
+
 ## Run
 
 From this directory, with a recent stable Rust toolchain and a Linux graphical session and GTK 4, libadwaita 1.6 or newer, and PangoCairo development packages:
