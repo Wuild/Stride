@@ -130,6 +130,7 @@ pub struct Terminal {
     pub ghost: String,
     pub suggestions: Vec<String>,
     pub directory: Option<String>,
+    pub reported_directory: Option<String>,
     pub input: String,
     pub input_start: Option<Point>,
     prompt_head: Option<usize>,
@@ -168,6 +169,7 @@ impl Terminal {
             ghost: String::new(),
             suggestions: Vec::new(),
             directory: None,
+            reported_directory: None,
             input: String::new(),
             input_start: None,
             prompt_head: None,
@@ -715,7 +717,18 @@ impl Perform for Terminal {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _: bool) {
-        if params.first().copied() != Some(b"133") || self.alternate() {
+        if self.alternate() {
+            return;
+        }
+        if params.first().copied() == Some(b"7") {
+            self.reported_directory = params
+                .get(1)
+                .filter(|value| params.len() == 2 && value.len() <= 4096)
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .map(str::to_owned);
+            return;
+        }
+        if params.first().copied() != Some(b"133") {
             return;
         }
         match params.get(1).copied() {

@@ -63,6 +63,15 @@ cargo test --locked
 
 Stride starts new sessions in your home folder and launches `$SHELL`, defaulting to Bash. With Bash it loads `~/.bashrc` through a temporary startup file and adds session-local prompt and Readline hooks. It uses Bash’s existing history and leaves your dotfiles as they are.
 
+### SSH sessions
+
+Use your usual `ssh user@host` command. Ctrl+C copies a text selection or sends an
+interrupt. Ctrl+V pastes in the primary SSH terminal screen. Ctrl+Shift+V also
+pastes when a remote full-screen program is active.
+
+Stride draws a read-only breadcrumb inline for standard SSH prompts such as
+`user@host:directory$`. An OSC 7 directory report can supply the displayed path.
+
 | Input | Action |
 | --- | --- |
 | Drag | Select terminal text |

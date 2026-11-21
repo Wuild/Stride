@@ -300,6 +300,14 @@ impl State {
         closed
     }
 
+    fn ssh_foreground(&self) -> bool {
+        self.session
+            .as_ref()
+            .and_then(Session::foreground_program)
+            .as_deref()
+            == Some("ssh")
+    }
+
     fn prompt(&self) -> bool {
         self.terminal.at_prompt
             && !self.terminal.alternate()
@@ -1188,6 +1196,85 @@ fn draw(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: i32, h: i32, state
     }
 
     let (row, col) = terminal.cursor();
+    if state.selection.is_none()
+        && viewport.contains(row)
+        && !terminal.alternate()
+        && state.ssh_foreground()
+    {
+        let line = terminal.text((row, 0), (row, cols - 1));
+        if let Some((identity, path, prompt_columns)) = ssh_prompt_location(&line)
+            && prompt_columns <= col
+        {
+            let (x, y) = position(row, 0);
+            let reported = terminal
+                .reported_directory
+                .as_deref()
+                .and_then(ssh_reported_path);
+            let label = if path == "~" {
+                identity.to_owned()
+            } else {
+                format_ssh_breadcrumb(identity, reported.as_deref().unwrap_or(path))
+            };
+            let available = prompt_columns as f64 * width;
+            let block_height = height - 4.0;
+            let badge_width = 2.5 * width;
+            let join_width = width * 0.7;
+            let label_x = x + badge_width + join_width;
+            let label_width = available - badge_width - join_width - 8.0;
+            if label_width > width * 2.0 {
+                theme.bg.cairo(cr);
+                cr.rectangle(x, y, available, height);
+                let _ = cr.fill();
+                theme.surface.mix(theme.fg, 0.07).cairo(cr);
+                rounded_fill(cr, x, y + 2.0, available - 3.0, block_height);
+                theme.accent.cairo(cr);
+                rounded_fill(cr, x, y + 2.0, badge_width, block_height);
+                cr.rectangle(x + badge_width - 4.0, y + 2.0, 4.0, block_height);
+                cr.move_to(x + badge_width, y + 2.0);
+                cr.line_to(label_x, y + height * 0.5);
+                cr.line_to(x + badge_width, y + height - 2.0);
+                cr.close_path();
+                let _ = cr.fill();
+
+                layout.set_text(">_");
+                let (icon_width, icon_height) = layout.pixel_size();
+                theme.accent_fg.cairo(cr);
+                cr.move_to(
+                    x + (badge_width - f64::from(icon_width)) * 0.5,
+                    y + (height - f64::from(icon_height)) * 0.5,
+                );
+                pangocairo::functions::show_layout(cr, &layout);
+                let icon = if path == "~" {
+                    FolderIcon::Home
+                } else {
+                    FolderIcon::Folder
+                };
+                theme.fg.cairo(cr);
+                icon.draw(cr, label_x + 7.0, y + height * 0.5);
+                let mut compact_font = font.clone();
+                compact_font.set_absolute_size(state.font_size * 0.84 * f64::from(pango::SCALE));
+                layout.set_font_description(Some(&compact_font));
+                let text_width = (label_width - 13.0).max(1.0);
+                layout.set_text(identity);
+                let identity_width = f64::from(layout.pixel_size().0);
+                if identity_width > text_width {
+                    let scaled =
+                        (state.font_size * 0.84 * text_width / (identity_width + 2.0)).max(8.0);
+                    compact_font.set_absolute_size(scaled * f64::from(pango::SCALE));
+                    layout.set_font_description(Some(&compact_font));
+                }
+                layout.set_width((text_width * f64::from(pango::SCALE)) as i32);
+                layout.set_ellipsize(pango::EllipsizeMode::End);
+                layout.set_text(&label);
+                let (_, label_height) = layout.pixel_size();
+                cr.move_to(label_x + 16.0, y + (height - f64::from(label_height)) * 0.5);
+                pangocairo::functions::show_layout(cr, &layout);
+                layout.set_font_description(Some(&font));
+                layout.set_width(-1);
+                layout.set_ellipsize(pango::EllipsizeMode::None);
+            }
+        }
+    }
     if terminal.cursor_visible
         && viewport.contains(row)
         && (state.top.is_none() || viewport.pinned.contains(&row))
@@ -1322,6 +1409,7 @@ fn paste_clipboard(
     area: &gtk::DrawingArea,
     state: &Rc<RefCell<State>>,
     password_prompt: Option<Point>,
+    require_ssh: bool,
 ) {
     area.clipboard().read_text_async(
         None::<&gio::Cancellable>,
@@ -1333,9 +1421,10 @@ fn paste_clipboard(
             move |result| {
                 if let Ok(Some(text)) = result {
                     let mut state = state.borrow_mut();
-                    if password_prompt.is_some()
-                        && (!state.track_password_prompt()
-                            || state.password_mask.anchor != password_prompt)
+                    if (require_ssh && !state.ssh_foreground())
+                        || (password_prompt.is_some()
+                            && (!state.track_password_prompt()
+                                || state.password_mask.anchor != password_prompt))
                     {
                         return;
                     }
@@ -1393,7 +1482,7 @@ fn install_terminal_menu(
             #[weak]
             state,
             move || {
-                paste_clipboard(&area, &state, None);
+                paste_clipboard(&area, &state, None, false);
             }
         ),
     );
@@ -1769,7 +1858,7 @@ fn install_input(
             let mut state_ref = state.borrow_mut();
             if state_ref.track_password_prompt() {
                 if ctrl && lower == K::v && shift {
-                    paste_clipboard(&area, &state, state_ref.password_mask.anchor);
+                    paste_clipboard(&area, &state, state_ref.password_mask.anchor, false);
                 } else {
                     state_ref.send_password_key(key, mods);
                 }
@@ -1788,8 +1877,13 @@ fn install_input(
                 } else if !shift {
                     state_ref.edit([3], false);
                 }
-            } else if ctrl && lower == K::v && (shift || state_ref.prompt()) {
-                paste_clipboard(&area, &state, None);
+            } else if ctrl
+                && lower == K::v
+                && (shift
+                    || state_ref.prompt()
+                    || (!state_ref.terminal.alternate() && state_ref.ssh_foreground()))
+            {
+                paste_clipboard(&area, &state, None, !shift && !state_ref.prompt());
             } else if ctrl && shift && matches!(key, K::Return | K::KP_Enter) && state_ref.prompt()
             {
                 state_ref.edit(PREPARE_ELEVATED, false);
@@ -2165,6 +2259,21 @@ impl SessionTitles {
         programs
     }
 
+    fn close_exited_shell(&self, pane: &gtk::Widget) {
+        if close_split_pane(pane) {
+            return;
+        }
+        let (Some(view), Some(parent)) = (self.view.upgrade(), pane.parent()) else {
+            return;
+        };
+        if let Some(page) = (0..view.n_pages())
+            .map(|index| view.nth_page(index))
+            .find(|page| page.child() == parent)
+        {
+            view.close_page(&page);
+        }
+    }
+
     fn request_close_pane(&self, pane: &gtk::Widget) -> bool {
         if !pane
             .parent()
@@ -2440,6 +2549,60 @@ fn populate_history(
     }
 }
 
+fn ssh_reported_path(uri: &str) -> Option<glib::GString> {
+    let uri = glib::Uri::parse(uri, glib::UriFlags::NONE).ok()?;
+    if uri.scheme() != "file"
+        || uri.userinfo().is_some()
+        || uri.query().is_some()
+        || uri.fragment().is_some()
+    {
+        return None;
+    }
+    let host = uri
+        .host()
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "SSH".into());
+    let path = uri.path();
+    if !path.starts_with('/') || host.chars().chain(path.chars()).any(char::is_control) {
+        return None;
+    }
+    Some(path)
+}
+
+fn ssh_prompt_location(line: &str) -> Option<(&str, &str, usize)> {
+    let prompt = ["$ ", "# "]
+        .into_iter()
+        .filter_map(|marker| line.find(marker))
+        .min()?;
+    let (identity, path) = line[..prompt].split_once(':')?;
+    let (user, host) = identity.split_once('@')?;
+    let valid = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if !valid(user)
+        || !valid(host)
+        || !(path == "~" || path.starts_with("~/") || path.starts_with('/'))
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some((identity, path, line[..prompt + 2].width()))
+}
+
+fn format_ssh_breadcrumb(identity: &str, path: &str) -> String {
+    let mut components = path.split('/').filter(|part| !part.is_empty());
+    let crumb = match (components.next(), components.next(), components.next()) {
+        (None, _, _) => "/".into(),
+        (Some(first), None, _) => first.to_owned(),
+        (Some(first), Some(second), None) => format!("{first}  ›  {second}"),
+        (_, _, Some(third)) => format!("…  ›  {}", components.last().unwrap_or(third)),
+    };
+    format!("{identity}  ›  {crumb}")
+}
+
 fn build_terminal_pane(titles: &Rc<SessionTitles>, launch: &LaunchOptions) -> gtk::Box {
     let (state, error) = State::new(launch);
     let state = Rc::new(RefCell::new(state));
@@ -2602,7 +2765,7 @@ fn build_terminal_pane(titles: &Rc<SessionTitles>, launch: &LaunchOptions) -> gt
     });
     let weak_state = Rc::downgrade(&state);
     let pane_for_title = pane.downgrade();
-    let titles = titles.clone();
+    let titles_for_timer = titles.clone();
     let weak_area = area.downgrade();
     glib::timeout_add_local(std::time::Duration::from_millis(125), move || {
         let (Some(state), Some(area)) = (weak_state.upgrade(), weak_area.upgrade()) else {
@@ -2612,10 +2775,13 @@ fn build_terminal_pane(titles: &Rc<SessionTitles>, launch: &LaunchOptions) -> gt
             let mut state = state.borrow_mut();
             let before = state.password_mask.anchor;
             state.track_password_prompt();
+            if !state.ssh_foreground() {
+                state.terminal.reported_directory = None;
+            }
             (pane_title(&state), before != state.password_mask.anchor)
         };
         if let Some(pane) = pane_for_title.upgrade() {
-            titles.update(&pane, title);
+            titles_for_timer.update(&pane, title);
         }
         if changed {
             area.queue_draw();
@@ -2635,6 +2801,9 @@ fn build_terminal_pane(titles: &Rc<SessionTitles>, launch: &LaunchOptions) -> gt
         let weak_history = history.downgrade();
         let weak_history_items = history_items.downgrade();
         let weak_history_search = history_search.downgrade();
+        let weak_pane = pane.downgrade();
+        let weak_titles = Rc::downgrade(titles);
+        let close_on_exit = launch.command.is_empty();
 
         glib::source::unix_fd_add_local_full(
             wake.as_raw_fd(),
@@ -2682,10 +2851,18 @@ fn build_terminal_pane(titles: &Rc<SessionTitles>, launch: &LaunchOptions) -> gt
                 }
                 area.queue_draw();
                 if closed {
-                    if let Some(overlay) = weak_overlay.upgrade() {
-                        overlay.add_toast(adw::Toast::new("Shell exited"));
-                    }
                     session_state.session = None;
+                    if close_on_exit {
+                        let pane = weak_pane.clone();
+                        let titles = weak_titles.clone();
+                        glib::idle_add_local_once(move || {
+                            if let (Some(pane), Some(titles)) = (pane.upgrade(), titles.upgrade()) {
+                                titles.close_exited_shell(pane.upcast_ref());
+                            }
+                        });
+                    } else if let Some(overlay) = weak_overlay.upgrade() {
+                        overlay.add_toast(adw::Toast::new("Program exited"));
+                    }
                     glib::ControlFlow::Break
                 } else {
                     glib::ControlFlow::Continue
@@ -3774,16 +3951,101 @@ mod tests {
         assert_eq!(tab_split.orientation(), gtk::Orientation::Horizontal);
         assert_eq!(view.selected_page(), Some(second_page.clone()));
 
+        let exit_shell = |pane: &gtk::Widget| {
+            let controllers = first_terminal(pane).unwrap().observe_controllers();
+            let input = (0..controllers.n_items())
+                .find_map(|index| {
+                    controllers
+                        .item(index)
+                        .and_downcast::<gtk::EventControllerKey>()
+                        .filter(|keys| keys.propagation_phase() != gtk::PropagationPhase::Capture)
+                })
+                .unwrap();
+            for key in [
+                gdk::Key::e,
+                gdk::Key::x,
+                gdk::Key::i,
+                gdk::Key::t,
+                gdk::Key::Return,
+            ] {
+                assert!(input.emit_by_name::<bool>(
+                    "key-pressed",
+                    &[&key, &0u32, &gdk::ModifierType::empty()]
+                ));
+            }
+        };
+        let wait_for_exit = |condition: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while !condition() {
+                while context.pending() {
+                    context.iteration(false);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Exited shell did not close its view"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let remaining = tab_split.start_child().unwrap();
+        exit_shell(&tab_split.end_child().unwrap());
+        wait_for_exit(&|| second_page.child().first_child().as_ref() == Some(&remaining));
+        assert_eq!(view.n_pages(), 2);
+
+        view.emit_by_name::<()>("setup-menu", &[&Some(second_page.clone())]);
+        bar.activate_action("tab.new", None).unwrap();
+        let extra_page = view.selected_page().unwrap();
+        assert_eq!(view.n_pages(), 3);
         view.set_selected_page(&initial_page);
-        view.emit_by_name::<()>("setup-menu", &[&Some(second_page)]);
+        view.emit_by_name::<()>("setup-menu", &[&Some(extra_page)]);
         bar.activate_action("tab.close", None).unwrap();
-        assert_eq!(view.n_pages(), 1);
-        assert_eq!(view.selected_page(), Some(initial_page));
+        assert_eq!(view.n_pages(), 2);
+
+        exit_shell(&remaining);
+        wait_for_exit(&|| view.n_pages() == 1);
+        assert_eq!(view.selected_page().as_ref(), Some(&initial_page));
         assert_eq!(
             heading.visible_child_name().as_deref(),
             Some("window-title")
         );
-        window.close();
+
+        exit_shell(&original);
+        wait_for_exit(&|| !window.is_visible());
+    }
+
+    #[test]
+    fn ssh_prompt_breadcrumb_uses_home_and_absolute_paths() {
+        assert_eq!(
+            ssh_prompt_location("wuild@voracious:~$ "),
+            Some(("wuild@voracious", "~", 19))
+        );
+        assert_eq!(
+            ssh_prompt_location("root@host.example:/var/Project Folder# ls"),
+            Some(("root@host.example", "/var/Project Folder", 39))
+        );
+        assert_eq!(
+            ssh_prompt_location("Last login: 14:06:14 from 192.0.2.3"),
+            None
+        );
+        assert_eq!(ssh_prompt_location("host:~/missing-user$ "), None);
+    }
+
+    #[test]
+    fn ssh_breadcrumb_decodes_paths_without_changing_local_directory() {
+        let mut terminal = Terminal::new(40, 4);
+        vte::Parser::new().advance(
+            &mut terminal,
+            b"\x1b]133;W;/local\x07\x1b]7;file://remote/home/user/a%20folder\x07",
+        );
+        assert_eq!(terminal.directory.as_deref(), Some("/local"));
+        let path = ssh_reported_path(terminal.reported_directory.as_deref().unwrap()).unwrap();
+        assert_eq!(path.as_str(), "/home/user/a folder");
+        assert_eq!(
+            format_ssh_breadcrumb("user@remote", &path),
+            "user@remote  ›  …  ›  a folder"
+        );
+        assert!(ssh_reported_path("file://remote/home/%0Abad").is_none());
+        assert!(ssh_reported_path("https://remote/home").is_none());
     }
 
     #[test]
