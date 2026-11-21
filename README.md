@@ -4,16 +4,19 @@ A Linux terminal prototype built with Rust, GTK 4, and libadwaita. Stride owns t
 
 ## Install or update on Fedora and Nobara
 
-Download the RPM for your distribution version and architecture from the
-[Stride releases](https://github.com/Wuild/Stride/releases). From the download directory:
+On Fedora or Nobara 44 (x86-64), enable the signed Stride repository once:
 
 ```sh
-sudo dnf install ./stride-0.1.1-1.fc44.x86_64.rpm
+sudo dnf config-manager addrepo --from-repofile=https://wuild.github.io/Stride/stride.repo
+sudo dnf install stride
 ```
 
-To update, download the newer RPM and run `sudo dnf upgrade ./<new-rpm-filename>`
-with its actual filename. Each RPM uses the same package name so DNF can upgrade
-it in place.
+After that, `sudo dnf upgrade` includes new Stride versions when they are
+published to the [RPM feed](https://wuild.github.io/Stride/). Its signing key
+fingerprint is `15468090849900177FABB8D814F8BDD786AE6595`.
+
+Standalone packages are also available from the
+[GitHub releases](https://github.com/Wuild/Stride/releases).
 
 ### Set Stride as your default terminal
 
